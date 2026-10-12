@@ -310,6 +310,7 @@ make dmg VERSION=0.02    # set a custom version
 MonitorPower/
 ├── App/
 │   ├── Info.plist                  # bundle metadata (LSUIElement = menu bar only)
+│   ├── MonitorPower.entitlements   # hardened-runtime entitlements
 │   └── Sources/
 │       ├── main.swift              # app entry point
 │       ├── AppDelegate.swift       # menu, switch, slider, setup flow
@@ -322,7 +323,7 @@ MonitorPower/
 │   ├── helper-install.sh           # installs or removes the helper and sudoers rule
 │   ├── install.sh                  # build and install from source
 │   └── uninstall.sh                # full removal
-├── Makefile                        # app / helper / dmg targets
+├── Makefile                        # app / helper / dmg / notarize targets
 └── RELEASE_NOTES.md
 ```
 
@@ -339,11 +340,59 @@ sudo smc-power allow      # restore normal behaviour
 
 The [GitHub Actions workflow](../.github/workflows/monitor-power.yml) builds the app and the DMG on an Apple Silicon macOS runner for every change. To publish a release, push a tag such as `v0.01`, or run the workflow manually from the **Actions** tab with a `release_tag` input. Either way, it publishes a GitHub Release with the DMG attached.
 
+### 🔏 Notarization
+
+Notarized builds open with no Gatekeeper warning. Notarization needs a paid **[Apple Developer Program](https://developer.apple.com/programs/)** membership (US$99/year).
+
+#### 1. Create a Developer ID certificate (one time)
+
+1. Join the Apple Developer Program and note your **Team ID** (see [developer.apple.com/account](https://developer.apple.com/account) → Membership details).
+2. On your Mac, open **Xcode → Settings → Accounts**, sign in, select your team, click **Manage Certificates…**, then **+ → Developer ID Application**.
+3. Open **Keychain Access → My Certificates**, right-click **Developer ID Application: Your Name (TEAMID)**, choose **Export…**, and save it as `cert.p12` with a strong password.
+
+#### 2. Create an app-specific password
+
+Go to [account.apple.com](https://account.apple.com) → **Sign-In and Security → App-Specific Passwords** and generate one named "notarytool". `notarytool` uses this password, never your real Apple ID password.
+
+#### 3a. Notarize locally
+
+```bash
+export APPLE_ID="you@example.com"
+export APPLE_TEAM_ID="ABCDE12345"
+export APPLE_APP_PASSWORD="abcd-efgh-ijkl-mnop"
+
+make clean
+make notarize SIGN_IDENTITY="Developer ID Application: Your Name (ABCDE12345)"
+```
+
+This signs the helper and the app with the hardened runtime and a secure timestamp, builds and signs the DMG, submits it to Apple, waits for approval (usually 1–10 minutes), staples the ticket to the DMG and verifies it with `spctl`.
+
+If Apple rejects it, fetch the log:
+
+```bash
+xcrun notarytool history --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+xcrun notarytool log <submission-id> --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+```
+
+#### 3b. Notarize in GitHub Actions
+
+Add these under **Settings → Secrets and variables → Actions → New repository secret**:
+
+| Secret | Value |
+|---|---|
+| `MACOS_CERT_P12` | Output of `base64 -i cert.p12 \| pbcopy` |
+| `MACOS_CERT_PASSWORD` | The password you set when exporting `cert.p12` |
+| `APPLE_ID` | Your Apple ID email |
+| `APPLE_TEAM_ID` | Your 10-character Team ID |
+| `APPLE_APP_PASSWORD` | The app-specific password |
+
+With `MACOS_CERT_P12` set, every workflow run signs with Developer ID and notarizes, and every release gets a notarized DMG. Without it, builds stay ad-hoc signed as before.
+
 ---
 
 ## ⚠️ Known limitations
 
-- **Not notarized.** The app is ad-hoc signed, so it needs the one-time approval described [above](#-opening-the-app-the-first-time).
+- **Not notarized yet.** Releases are ad-hoc signed and need the one-time approval described [above](#-opening-the-app-the-first-time) until the [notarization secrets](#-notarization) are configured.
 - **Undocumented SMC keys.** Apple has renamed these keys before (`CH0B` became `CHTE` in macOS 15.7 firmware) and could do so again.
 - **Apple Silicon only.**
 - **One user per Mac.** The sudoers rule is written for the user who ran setup. Another user on the same Mac must run **Install Helper…** themselves, which replaces the rule.
@@ -352,7 +401,8 @@ The [GitHub Actions workflow](../.github/workflows/monitor-power.yml) builds the
 
 ## 🗺️ Roadmap
 
-- [ ] Notarized, Developer ID–signed builds
+- [x] Notarization support in the build ([setup](#-notarization))
+- [ ] Publish notarized releases
 - [ ] App icon
 - [ ] Hold the battery at a target level (charge up to X%, then stop)
 - [ ] Per-monitor profiles (remember a setting for each display)

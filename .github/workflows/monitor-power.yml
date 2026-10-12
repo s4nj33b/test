@@ -23,6 +23,14 @@ jobs:
     defaults:
       run:
         working-directory: MonitorPower
+    env:
+      # Optional. When MACOS_CERT_P12 is set, builds are Developer ID-signed and
+      # notarized; otherwise they are ad-hoc signed. See README "Notarization".
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -40,8 +48,29 @@ jobs:
             echo "VERSION=0.01-dev.${GITHUB_SHA::7}" >> "$GITHUB_ENV"
           fi
 
+      - name: Import Developer ID certificate
+        if: env.MACOS_CERT_P12 != ''
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')
+          test -n "$IDENTITY" || { echo "No Developer ID Application identity in MACOS_CERT_P12" >&2; exit 1; }
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
       - name: Build app and DMG
-        run: make dmg VERSION="$VERSION"
+        run: make dmg VERSION="$VERSION" SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+
+      - name: Notarize DMG
+        if: env.SIGN_IDENTITY != ''
+        run: make notarize VERSION="$VERSION" SIGN_IDENTITY="$SIGN_IDENTITY"
 
       - name: Verify bundle
         run: |
