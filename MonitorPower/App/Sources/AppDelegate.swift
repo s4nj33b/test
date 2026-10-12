@@ -1,0 +1,290 @@
+import AppKit
+import ServiceManagement
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private enum Defaults {
+        static let chargingEnabled = "chargingEnabled"
+        static let offMode = "offMode"
+    }
+
+    /// In "block" mode the Mac runs on battery; below this level we fall back
+    /// to "inhibit" so the Mac keeps running from the monitor instead of dying.
+    private let lowBatteryFallbackPercent = 10
+    /// Minimum seconds between automatic re-applies triggered by power events.
+    private let reapplyThrottle: TimeInterval = 30
+
+    private let controller = PowerController()
+    private var powerMonitor: PowerSourceMonitor?
+    private var statusItem: NSStatusItem!
+    private let menu = NSMenu()
+
+    private let toggle = NSSwitch()
+    private let batteryItem = NSMenuItem()
+    private let sourceItem = NSMenuItem()
+    private let errorItem = NSMenuItem()
+    private let inhibitModeItem = NSMenuItem()
+    private let blockModeItem = NSMenuItem()
+    private let loginItem = NSMenuItem()
+
+    private var lastApplied: PowerMode?
+    private var lastApplyDate = Date.distantPast
+    private var lastError: String?
+
+    // MARK: - Persisted settings
+
+    private var chargingEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: Defaults.chargingEnabled) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: Defaults.chargingEnabled) }
+    }
+
+    /// What "off" means: stop charging only, or ignore monitor power entirely.
+    private var offMode: PowerMode {
+        get {
+            let raw = UserDefaults.standard.string(forKey: Defaults.offMode) ?? PowerMode.inhibit.rawValue
+            return PowerMode(rawValue: raw) == .block ? .block : .inhibit
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: Defaults.offMode) }
+    }
+
+    /// The SMC mode that should currently be in effect.
+    private var desiredMode: PowerMode {
+        if chargingEnabled { return .allow }
+        if offMode == .block, let pct = BatteryInfo.current().percent, pct <= lowBatteryFallbackPercent {
+            return .inhibit
+        }
+        return offMode
+    }
+
+    // MARK: - Lifecycle
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        buildMenu()
+        statusItem.menu = menu
+
+        powerMonitor = PowerSourceMonitor { [weak self] in self?.powerSourceChanged() }
+
+        // SMC charge settings are reset by sleep on some firmware; re-assert on wake.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(didWake),
+            name: NSWorkspace.didWakeNotification, object: nil)
+
+        applyDesiredMode(force: true)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Never leave the Mac unable to charge once the app is gone.
+        if lastApplied != .allow {
+            _ = controller.applySync(.allow)
+        }
+    }
+
+    // MARK: - Menu
+
+    private func buildMenu() {
+        menu.delegate = self
+        menu.autoenablesItems = false
+
+        let toggleItem = NSMenuItem()
+        toggleItem.view = makeToggleView()
+        menu.addItem(toggleItem)
+        menu.addItem(.separator())
+
+        for item in [batteryItem, sourceItem] {
+            item.isEnabled = false
+            menu.addItem(item)
+        }
+        errorItem.isEnabled = false
+        errorItem.isHidden = true
+        menu.addItem(errorItem)
+        menu.addItem(.separator())
+
+        let offModeParent = NSMenuItem(title: "When Off", action: nil, keyEquivalent: "")
+        let offModeMenu = NSMenu()
+        inhibitModeItem.title = "Stop Charging (keep using monitor power)"
+        inhibitModeItem.action = #selector(selectInhibitMode)
+        inhibitModeItem.target = self
+        blockModeItem.title = "Disconnect Monitor Power (run on battery)"
+        blockModeItem.action = #selector(selectBlockMode)
+        blockModeItem.target = self
+        offModeMenu.addItem(inhibitModeItem)
+        offModeMenu.addItem(blockModeItem)
+        offModeParent.submenu = offModeMenu
+        menu.addItem(offModeParent)
+
+        loginItem.title = "Launch at Login"
+        loginItem.action = #selector(toggleLaunchAtLogin)
+        loginItem.target = self
+        menu.addItem(loginItem)
+
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "Quit Monitor Power", action: #selector(quit), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+
+        refreshUI()
+    }
+
+    private func makeToggleView() -> NSView {
+        let label = NSTextField(labelWithString: "Charge from Monitor")
+        label.font = .menuFont(ofSize: 0)
+
+        toggle.target = self
+        toggle.action = #selector(toggleChanged)
+        toggle.controlSize = .small
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+
+        let stack = NSStackView(views: [label, spacer, toggle])
+        stack.orientation = .horizontal
+        stack.edgeInsets = NSEdgeInsets(top: 6, left: 14, bottom: 6, right: 14)
+        stack.frame = NSRect(x: 0, y: 0, width: 280, height: 32)
+        stack.autoresizingMask = [.width]
+        return stack
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        refreshUI()
+    }
+
+    private func refreshUI() {
+        toggle.state = chargingEnabled ? .on : .off
+
+        let info = BatteryInfo.current()
+        let pct = info.percent.map { "\($0)%" } ?? "—"
+        let state: String
+        if info.isCharging {
+            state = "Charging"
+        } else if info.onExternalPower {
+            state = lastApplied == .block ? "On Battery (monitor power ignored)" : "Not Charging"
+        } else {
+            state = "On Battery"
+        }
+        batteryItem.title = "Battery: \(pct) · \(state)"
+
+        if lastApplied == .block {
+            sourceItem.title = "USB-C Power: Ignored"
+        } else if info.onExternalPower {
+            let watts = info.adapterWatts.map { " (\($0) W)" } ?? ""
+            sourceItem.title = "USB-C Power Connected\(watts)"
+        } else {
+            sourceItem.title = "No USB-C Power Connected"
+        }
+
+        if let lastError {
+            errorItem.title = "⚠︎ \(lastError)"
+            errorItem.isHidden = false
+        } else {
+            errorItem.isHidden = true
+        }
+
+        inhibitModeItem.state = offMode == .inhibit ? .on : .off
+        blockModeItem.state = offMode == .block ? .on : .off
+
+        if #available(macOS 13.0, *) {
+            loginItem.isHidden = false
+            loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        } else {
+            loginItem.isHidden = true
+        }
+
+        updateIcon()
+    }
+
+    private func updateIcon() {
+        let symbol = chargingEnabled ? "bolt.fill" : "bolt.slash.fill"
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Monitor Power")
+        image?.isTemplate = true
+        statusItem.button?.image = image
+        statusItem.button?.toolTip = chargingEnabled
+            ? "Monitor Power: charging from monitor"
+            : "Monitor Power: charging from monitor is off"
+    }
+
+    // MARK: - Actions
+
+    @objc private func toggleChanged() {
+        chargingEnabled = toggle.state == .on
+        applyDesiredMode(force: true)
+    }
+
+    @objc private func selectInhibitMode() {
+        offMode = .inhibit
+        applyDesiredMode(force: true)
+    }
+
+    @objc private func selectBlockMode() {
+        offMode = .block
+        applyDesiredMode(force: true)
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        guard #available(macOS 13.0, *) else { return }
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+            lastError = nil
+        } catch {
+            lastError = "Launch at login: \(error.localizedDescription)"
+        }
+        refreshUI()
+    }
+
+    @objc private func quit() {
+        NSApp.terminate(nil)
+    }
+
+    @objc private func didWake() {
+        // Give the SMC a moment to settle after wake before re-asserting.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            self?.applyDesiredMode(force: true)
+        }
+    }
+
+    private func powerSourceChanged() {
+        let desired = desiredMode
+        let info = BatteryInfo.current()
+        // Re-assert if the mode should change (e.g. low-battery fallback) or if the
+        // firmware started charging again on its own (e.g. after a cable re-plug).
+        let drifted = desired != .allow && info.isCharging
+        if desired != lastApplied || drifted {
+            applyDesiredMode(force: false)
+        } else {
+            refreshUI()
+        }
+    }
+
+    // MARK: - Applying
+
+    private func applyDesiredMode(force: Bool) {
+        let mode = desiredMode
+        if !force, Date().timeIntervalSince(lastApplyDate) < reapplyThrottle {
+            refreshUI()
+            return
+        }
+        lastApplyDate = Date()
+
+        guard controller.helperInstalled else {
+            lastError = "Helper not installed. Run scripts/install.sh"
+            refreshUI()
+            return
+        }
+
+        controller.apply(mode) { [weak self] result in
+            guard let self else { return }
+            if result.success {
+                self.lastApplied = mode
+                self.lastError = nil
+            } else {
+                self.lastError = result.output.contains("password")
+                    ? "Permission denied. Re-run scripts/install.sh"
+                    : "Failed: \(result.output)"
+            }
+            self.refreshUI()
+        }
+    }
+}
