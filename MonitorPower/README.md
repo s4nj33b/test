@@ -337,7 +337,7 @@ sudo smc-power allow      # restore normal behaviour
 
 ### Releases
 
-The [GitHub Actions workflow](../.github/workflows/monitor-power.yml) builds the app and the DMG on an Apple Silicon macOS runner for every change. Pushing a tag such as `v0.01` publishes a GitHub Release with the DMG attached.
+The [GitHub Actions workflow](../.github/workflows/monitor-power.yml) builds the app and the DMG on an Apple Silicon macOS runner for every change. To publish a release, push a tag such as `v0.01`, or run the workflow manually from the **Actions** tab with a `release_tag` input. Either way, it publishes a GitHub Release with the DMG attached.
 
 ---
 
