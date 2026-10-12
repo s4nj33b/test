@@ -298,6 +298,7 @@ macOS only lets root write to the SMC. You enter your password once, during setu
 git clone https://github.com/s4nj33b/test.git
 cd test/MonitorPower
 
+./scripts/build-dmg.sh   # one step: build, verify and show build/MonitorPower-<version>.dmg
 make app                 # build/MonitorPower.app (helper included)
 make dmg                 # build/MonitorPower-0.01.dmg
 make dmg VERSION=0.02    # set a custom version
@@ -320,6 +321,7 @@ MonitorPower/
 ├── helper/
 │   └── smc-power.c                 # root helper that writes SMC keys
 ├── scripts/
+│   ├── build-dmg.sh                # one-step DMG build (optionally notarized)
 │   ├── helper-install.sh           # installs or removes the helper and sudoers rule
 │   ├── install.sh                  # build and install from source
 │   └── uninstall.sh                # full removal
