@@ -5,11 +5,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private enum Defaults {
         static let chargingEnabled = "chargingEnabled"
         static let offMode = "offMode"
+        static let fallbackPercent = "fallbackPercent"
     }
 
-    /// In "block" mode the Mac runs on battery; below this level we fall back
-    /// to "inhibit" so the Mac keeps running from the monitor instead of dying.
-    private let lowBatteryFallbackPercent = 10
+    /// Range and step of the low-battery fallback slider, in battery percent.
+    private let fallbackRange = 10...80
+    private let fallbackStep = 5
+    private let defaultFallbackPercent = 20
     /// Minimum seconds between automatic re-applies triggered by power events.
     private let reapplyThrottle: TimeInterval = 30
 
@@ -25,6 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let inhibitModeItem = NSMenuItem()
     private let blockModeItem = NSMenuItem()
     private let loginItem = NSMenuItem()
+    private let fallbackSlider = NSSlider()
+    private let fallbackLabel = NSTextField(labelWithString: "")
 
     private var lastApplied: PowerMode?
     private var lastApplyDate = Date.distantPast
@@ -46,10 +50,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         set { UserDefaults.standard.set(newValue.rawValue, forKey: Defaults.offMode) }
     }
 
+    /// In "block" mode the Mac runs on battery; at or below this level it falls
+    /// back to "inhibit", so the Mac runs from the monitor and the battery holds.
+    private var fallbackPercent: Int {
+        get {
+            let stored = UserDefaults.standard.object(forKey: Defaults.fallbackPercent) as? Int
+            return min(max(stored ?? defaultFallbackPercent, fallbackRange.lowerBound), fallbackRange.upperBound)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: Defaults.fallbackPercent) }
+    }
+
     /// The SMC mode that should currently be in effect.
     private var desiredMode: PowerMode {
         if chargingEnabled { return .allow }
-        if offMode == .block, let pct = BatteryInfo.current().percent, pct <= lowBatteryFallbackPercent {
+        if offMode == .block, let pct = BatteryInfo.current().percent, pct <= fallbackPercent {
             return .inhibit
         }
         return offMode
@@ -109,6 +123,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         blockModeItem.target = self
         offModeMenu.addItem(inhibitModeItem)
         offModeMenu.addItem(blockModeItem)
+        let sliderItem = NSMenuItem()
+        sliderItem.view = makeFallbackSliderView()
+        offModeMenu.addItem(sliderItem)
         offModeParent.submenu = offModeMenu
         menu.addItem(offModeParent)
 
@@ -142,6 +159,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stack.frame = NSRect(x: 0, y: 0, width: 280, height: 32)
         stack.autoresizingMask = [.width]
         return stack
+    }
+
+    private func makeFallbackSliderView() -> NSView {
+        fallbackLabel.font = .menuFont(ofSize: NSFont.smallSystemFontSize)
+        fallbackLabel.textColor = .secondaryLabelColor
+
+        fallbackSlider.minValue = Double(fallbackRange.lowerBound)
+        fallbackSlider.maxValue = Double(fallbackRange.upperBound)
+        fallbackSlider.numberOfTickMarks = (fallbackRange.upperBound - fallbackRange.lowerBound) / fallbackStep + 1
+        fallbackSlider.allowsTickMarkValuesOnly = true
+        fallbackSlider.controlSize = .small
+        fallbackSlider.isContinuous = true
+        fallbackSlider.target = self
+        fallbackSlider.action = #selector(fallbackSliderChanged)
+        fallbackSlider.widthAnchor.constraint(greaterThanOrEqualToConstant: 190).isActive = true
+
+        let minLabel = NSTextField(labelWithString: "\(fallbackRange.lowerBound)%")
+        let maxLabel = NSTextField(labelWithString: "\(fallbackRange.upperBound)%")
+        for label in [minLabel, maxLabel] {
+            label.font = .menuFont(ofSize: NSFont.smallSystemFontSize)
+            label.textColor = .tertiaryLabelColor
+        }
+        let sliderRow = NSStackView(views: [minLabel, fallbackSlider, maxLabel])
+        sliderRow.orientation = .horizontal
+        sliderRow.spacing = 6
+
+        let stack = NSStackView(views: [fallbackLabel, sliderRow])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.edgeInsets = NSEdgeInsets(top: 4, left: 22, bottom: 6, right: 14)
+        stack.frame = NSRect(x: 0, y: 0, width: 300, height: 52)
+        stack.autoresizingMask = [.width]
+        return stack
+    }
+
+    private func updateFallbackLabel() {
+        fallbackLabel.stringValue = "Use monitor power at or below \(fallbackPercent)% battery"
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -181,6 +236,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         inhibitModeItem.state = offMode == .inhibit ? .on : .off
         blockModeItem.state = offMode == .block ? .on : .off
+        fallbackSlider.integerValue = fallbackPercent
+        fallbackSlider.isEnabled = offMode == .block
+        fallbackLabel.textColor = offMode == .block ? .secondaryLabelColor : .tertiaryLabelColor
+        updateFallbackLabel()
 
         if #available(macOS 13.0, *) {
             loginItem.isHidden = false
@@ -217,6 +276,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func selectBlockMode() {
         offMode = .block
         applyDesiredMode(force: true)
+    }
+
+    @objc private func fallbackSliderChanged() {
+        let stepped = Int((fallbackSlider.doubleValue / Double(fallbackStep)).rounded()) * fallbackStep
+        fallbackPercent = stepped
+        updateFallbackLabel()
+
+        // Apply once the drag ends, and only if the threshold now changes the mode.
+        let isDragging = NSApp.currentEvent?.type == .leftMouseDragged
+        if !isDragging, desiredMode != lastApplied {
+            applyDesiredMode(force: true)
+        }
     }
 
     @objc private func toggleLaunchAtLogin() {

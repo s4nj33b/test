@@ -26,7 +26,7 @@ The icon is `bolt.fill` while charging is allowed and `bolt.slash.fill` while it
 | **Stop Charging** (default) | The Mac runs on the monitor's power, but the battery does not charge. Battery wear stays low. | `CHTE`, or `CH0B` + `CH0C` on older firmware |
 | **Disconnect Monitor Power** | The Mac ignores the monitor's power and runs on its battery. | `CHIE`, or `CH0I` on older firmware |
 
-In *Disconnect Monitor Power* mode, if the battery drops to 10% or below, the app switches to *Stop Charging* so the Mac keeps running on the monitor's power instead of shutting down.
+In *Disconnect Monitor Power* mode, a slider under that option sets a battery threshold from 10% to 80%, in 5% steps (default 20%). When the battery reaches the threshold, the app switches to *Stop Charging*. The Mac then runs on the monitor's power and the battery stays at that level instead of draining further. Raise the slider above the current battery level to switch over immediately; lower it to go back to running on battery.
 
 ## Requirements
 
