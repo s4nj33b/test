@@ -1,14 +1,48 @@
 import Foundation
+import IOKit
 import IOKit.ps
 
 /// Snapshot of the internal battery and the attached power source.
 struct BatteryInfo {
     var percent: Int?
     var isCharging = false
+    var isFullyCharged = false
     var onExternalPower = false
     var adapterWatts: Int?
 
     static func current() -> BatteryInfo {
+        var info = fromSmartBattery() ?? fromPowerSources()
+        if let adapter = IOPSCopyExternalPowerAdapterDetails()?.takeRetainedValue() as? [String: Any] {
+            info.adapterWatts = adapter[kIOPSPowerAdapterWattsKey] as? Int
+        }
+        return info
+    }
+
+    /// Reads the battery driver's registry entry directly. It reflects charge
+    /// state changes within a second or two, whereas the IOPowerSources summary
+    /// that powerd publishes can lag behind by much longer.
+    private static func fromSmartBattery() -> BatteryInfo? {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+        guard service != 0 else { return nil }
+        defer { IOObjectRelease(service) }
+
+        var props: Unmanaged<CFMutableDictionary>?
+        guard IORegistryEntryCreateCFProperties(service, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS,
+              let dict = props?.takeRetainedValue() as? [String: Any],
+              let charging = dict["IsCharging"] as? Bool
+        else { return nil }
+
+        var info = BatteryInfo()
+        info.isCharging = charging
+        info.isFullyCharged = dict["FullyCharged"] as? Bool ?? false
+        info.onExternalPower = dict["ExternalConnected"] as? Bool ?? false
+        if let cur = dict["CurrentCapacity"] as? Int, let max = dict["MaxCapacity"] as? Int, max > 0 {
+            info.percent = cur * 100 / max
+        }
+        return info
+    }
+
+    private static func fromPowerSources() -> BatteryInfo {
         var info = BatteryInfo()
         guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let sources = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef]
@@ -25,11 +59,8 @@ struct BatteryInfo {
                 info.percent = cur * 100 / max
             }
             info.isCharging = desc[kIOPSIsChargingKey] as? Bool ?? false
+            info.isFullyCharged = desc[kIOPSIsChargedKey] as? Bool ?? false
             info.onExternalPower = desc[kIOPSPowerSourceStateKey] as? String == kIOPSACPowerValue
-        }
-
-        if let adapter = IOPSCopyExternalPowerAdapterDetails()?.takeRetainedValue() as? [String: Any] {
-            info.adapterWatts = adapter[kIOPSPowerAdapterWattsKey] as? Int
         }
         return info
     }
@@ -49,12 +80,12 @@ final class PowerSourceMonitor {
             Unmanaged<PowerSourceMonitor>.fromOpaque(ctx).takeUnretainedValue().onChange()
         }, context)?.takeRetainedValue() else { return }
         runLoopSource = source
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
     }
 
     deinit {
         if let runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .defaultMode)
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         }
     }
 }

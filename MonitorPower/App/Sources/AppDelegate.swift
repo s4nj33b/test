@@ -33,6 +33,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var lastApplied: PowerMode?
     private var lastApplyDate = Date.distantPast
+    /// Mode just applied, and until when the hardware may still be catching up.
+    /// While the reported state disagrees with it, the menu says so instead of
+    /// showing the stale reading.
+    private var transition: (mode: PowerMode, until: Date)?
+    private let transitionTimeout: TimeInterval = 15
+    /// Refreshes the menu every second while it is open.
+    private var menuRefreshTimer: Timer?
     private var lastError: String?
 
     // MARK: - Persisted settings
@@ -218,6 +225,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         refreshUI()
+        menuRefreshTimer?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.refreshUI() }
+        // .common so it also fires while the menu is tracking the mouse.
+        RunLoop.main.add(timer, forMode: .common)
+        menuRefreshTimer = timer
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        menuRefreshTimer?.invalidate()
+        menuRefreshTimer = nil
+    }
+
+    /// Whether the reported battery state is what `mode` should produce.
+    private func batteryState(_ info: BatteryInfo, matches mode: PowerMode) -> Bool {
+        switch mode {
+        case .allow: return info.isCharging || info.isFullyCharged || !info.onExternalPower
+        case .inhibit, .block: return !info.isCharging
+        }
+    }
+
+    private func transitionText(for mode: PowerMode) -> String {
+        switch mode {
+        case .allow: return "Starting to Charge…"
+        case .inhibit: return "Stopping Charging…"
+        case .block: return "Switching to Battery…"
+        }
     }
 
     private func refreshUI() {
@@ -225,8 +258,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let info = BatteryInfo.current()
         let pct = info.percent.map { "\($0)%" } ?? "—"
+
+        if let t = transition, Date() >= t.until || batteryState(info, matches: t.mode) {
+            transition = nil
+        }
+
         let state: String
-        if info.isCharging {
+        if let t = transition {
+            state = transitionText(for: t.mode)
+        } else if info.isCharging {
             state = "Charging"
         } else if info.onExternalPower {
             state = lastApplied == .block ? "On Battery (monitor power ignored)" : "Not Charging"
@@ -457,9 +497,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         lastApplyDate = Date()
+        if mode != lastApplied {
+            transition = (mode, Date().addingTimeInterval(transitionTimeout))
+            // Pick up the new hardware state even if no power notification arrives.
+            for delay in [1.0, 2, 4, 8, transitionTimeout + 0.5] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.refreshUI() }
+            }
+        }
 
         guard controller.helperInstalled else {
             lastError = "Setup not finished. Choose “Install Helper…”"
+            transition = nil
             refreshUI()
             return
         }
@@ -470,6 +518,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.lastApplied = mode
                 self.lastError = nil
             } else {
+                self.transition = nil
                 self.lastError = result.output.contains("password")
                     ? "Permission denied. Choose “Install Helper…”"
                     : "Failed: \(result.output)"
