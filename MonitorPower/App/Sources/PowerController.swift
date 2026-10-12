@@ -11,7 +11,7 @@ enum PowerMode: String {
 }
 
 /// Talks to the root `smc-power` helper through a NOPASSWD sudoers rule
-/// installed by `scripts/install.sh`.
+/// installed by `HelperInstaller` or `scripts/install.sh`.
 final class PowerController {
     static let helperPath = "/usr/local/bin/smc-power"
 

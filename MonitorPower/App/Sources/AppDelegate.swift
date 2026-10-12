@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let inhibitModeItem = NSMenuItem()
     private let blockModeItem = NSMenuItem()
     private let loginItem = NSMenuItem()
+    private let installHelperItem = NSMenuItem()
     private let fallbackSlider = NSSlider()
     private let fallbackLabel = NSTextField(labelWithString: "")
 
@@ -83,12 +84,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self, selector: #selector(didWake),
             name: NSWorkspace.didWakeNotification, object: nil)
 
-        applyDesiredMode(force: true)
+        if moveToApplicationsIfNeeded() { return }
+        if HelperInstaller.isUpToDate {
+            applyDesiredMode(force: true)
+        } else {
+            promptToInstallHelper()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         // Never leave the Mac unable to charge once the app is gone.
-        if lastApplied != .allow {
+        if let lastApplied, lastApplied != .allow {
             _ = controller.applySync(.allow)
         }
     }
@@ -111,6 +117,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         errorItem.isEnabled = false
         errorItem.isHidden = true
         menu.addItem(errorItem)
+        installHelperItem.title = "Install Helper…"
+        installHelperItem.action = #selector(installHelper)
+        installHelperItem.target = self
+        menu.addItem(installHelperItem)
         menu.addItem(.separator())
 
         let offModeParent = NSMenuItem(title: "When Off", action: nil, keyEquivalent: "")
@@ -135,6 +145,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(loginItem)
 
         menu.addItem(.separator())
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        let versionItem = NSMenuItem(title: "Monitor Power \(version)", action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
+        let uninstall = NSMenuItem(title: "Uninstall…", action: #selector(uninstall), keyEquivalent: "")
+        uninstall.target = self
+        menu.addItem(uninstall)
         let quit = NSMenuItem(title: "Quit Monitor Power", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -227,6 +244,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             sourceItem.title = "No USB-C Power Connected"
         }
 
+        installHelperItem.isHidden = HelperInstaller.isUpToDate
+
         if let lastError {
             errorItem.title = "⚠︎ \(lastError)"
             errorItem.isHidden = false
@@ -309,6 +328,106 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.terminate(nil)
     }
 
+    // MARK: - Setup
+
+    /// Apps launched straight from the DMG run from a read-only, temporary
+    /// volume. Offer to copy the app to /Applications and relaunch from there.
+    /// Returns true when the app is relaunching and this instance should stop.
+    private func moveToApplicationsIfNeeded() -> Bool {
+        let bundleURL = Bundle.main.bundleURL
+        guard bundleURL.path.hasPrefix("/Volumes/") else { return false }
+
+        let alert = NSAlert()
+        alert.messageText = "Move Monitor Power to Applications?"
+        alert.informativeText = "Monitor Power is running from the disk image. Move it to the Applications folder so it keeps working after the disk image is ejected."
+        alert.addButton(withTitle: "Move to Applications")
+        alert.addButton(withTitle: "Not Now")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+
+        let destination = URL(fileURLWithPath: "/Applications").appendingPathComponent(bundleURL.lastPathComponent)
+        do {
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.trashItem(at: destination, resultingItemURL: nil)
+            }
+            try FileManager.default.copyItem(at: bundleURL, to: destination)
+        } catch {
+            showError("Could not move the app", error.localizedDescription + "\n\nDrag Monitor Power into the Applications folder manually.")
+            return false
+        }
+
+        let config = NSWorkspace.OpenConfiguration()
+        config.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: destination, configuration: config) { _, _ in
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
+        return true
+    }
+
+    private func promptToInstallHelper() {
+        let alert = NSAlert()
+        alert.messageText = "Finish setting up Monitor Power"
+        alert.informativeText = "To control charging, Monitor Power installs a small helper tool. macOS will ask for your administrator password once.\n\nAfter this, the switch works without asking again."
+        alert.addButton(withTitle: "Install Helper")
+        alert.addButton(withTitle: "Later")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            installHelper()
+        } else {
+            lastError = "Setup not finished. Choose “Install Helper…”"
+            refreshUI()
+        }
+    }
+
+    @objc private func installHelper() {
+        do {
+            try HelperInstaller.install()
+            lastError = nil
+            applyDesiredMode(force: true)
+        } catch let failure as HelperInstaller.Failure where failure.cancelled {
+            lastError = "Setup not finished. Choose “Install Helper…”"
+            refreshUI()
+        } catch {
+            lastError = "Helper install failed"
+            showError("Helper install failed", error.localizedDescription)
+            refreshUI()
+        }
+    }
+
+    @objc private func uninstall() {
+        let alert = NSAlert()
+        alert.messageText = "Uninstall Monitor Power?"
+        alert.informativeText = "This restores normal charging, removes the helper tool and quits the app. You can then drag Monitor Power from Applications to the Trash."
+        alert.addButton(withTitle: "Uninstall")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            try HelperInstaller.uninstall()
+        } catch let failure as HelperInstaller.Failure where failure.cancelled {
+            return
+        } catch {
+            showError("Uninstall failed", error.localizedDescription)
+            return
+        }
+        if #available(macOS 13.0, *) {
+            try? SMAppService.mainApp.unregister()
+        }
+        UserDefaults.standard.removePersistentDomain(forName: Bundle.main.bundleIdentifier ?? "")
+        lastApplied = .allow  // the uninstall script already restored charging
+        NSApp.terminate(nil)
+    }
+
+    private func showError(_ title: String, _ detail: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = detail
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
     @objc private func didWake() {
         // Give the SMC a moment to settle after wake before re-asserting.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
@@ -340,7 +459,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastApplyDate = Date()
 
         guard controller.helperInstalled else {
-            lastError = "Helper not installed. Run scripts/install.sh"
+            lastError = "Setup not finished. Choose “Install Helper…”"
             refreshUI()
             return
         }
@@ -352,7 +471,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.lastError = nil
             } else {
                 self.lastError = result.output.contains("password")
-                    ? "Permission denied. Re-run scripts/install.sh"
+                    ? "Permission denied. Choose “Install Helper…”"
                     : "Failed: \(result.output)"
             }
             self.refreshUI()

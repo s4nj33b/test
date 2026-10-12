@@ -1,0 +1,56 @@
+name: Monitor Power
+
+on:
+  push:
+    branches: ['**']
+    paths: ['MonitorPower/**', '.github/workflows/monitor-power.yml']
+    tags: ['v*']
+  pull_request:
+    paths: ['MonitorPower/**', '.github/workflows/monitor-power.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14   # Apple Silicon runner, matching the app's target hardware
+    defaults:
+      run:
+        working-directory: MonitorPower
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=0.01-dev.${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build app and DMG
+        run: make dmg VERSION="$VERSION"
+
+      - name: Verify bundle
+        run: |
+          codesign --verify --deep --strict build/MonitorPower.app
+          test -x build/MonitorPower.app/Contents/Resources/smc-power
+          test -f build/MonitorPower.app/Contents/Resources/helper-install.sh
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" build/MonitorPower.app/Contents/Info.plist
+          build/smc-power status || true   # the runner is a VM; SMC keys may be absent
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MonitorPower-${{ env.VERSION }}
+          path: MonitorPower/build/MonitorPower-*.dmg
+
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" build/MonitorPower-*.dmg \
+            --title "Monitor Power $VERSION" \
+            --notes-file RELEASE_NOTES.md \
+            --prerelease
