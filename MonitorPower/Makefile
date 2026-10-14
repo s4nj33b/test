@@ -44,13 +44,8 @@ $(APP): $(SOURCES) App/Info.plist $(ENTITLEMENTS) $(HELPER) scripts/helper-insta
 	cp $(HELPER) scripts/helper-install.sh $(APP)/Contents/Resources/
 	$(CODESIGN) --entitlements $(ENTITLEMENTS) $(APP)
 
-$(DMG): $(APP)
-	rm -rf $(BUILD)/dmg $@
-	mkdir -p $(BUILD)/dmg
-	cp -R $(APP) $(BUILD)/dmg/
-	ln -s /Applications $(BUILD)/dmg/Applications
-	hdiutil create -volname "Monitor Power $(VERSION)" -srcfolder $(BUILD)/dmg -ov -format UDZO $@
-	rm -rf $(BUILD)/dmg
+$(DMG): $(APP) scripts/make-dmg.sh
+	./scripts/make-dmg.sh $(APP) $@ "Monitor Power $(VERSION)"
 	if [ "$(SIGN_IDENTITY)" != "-" ]; then codesign --force --sign "$(SIGN_IDENTITY)" --timestamp $@; fi
 
 # Uploads the DMG to Apple's notary service, waits for the verdict and staples

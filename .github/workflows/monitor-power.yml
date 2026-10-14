@@ -72,6 +72,17 @@ jobs:
         if: env.SIGN_IDENTITY != ''
         run: make notarize VERSION="$VERSION" SIGN_IDENTITY="$SIGN_IDENTITY"
 
+      - name: Test DMG fallback path
+        run: |
+          MAKE_DMG_FALLBACK=1 ./scripts/make-dmg.sh build/MonitorPower.app build/fallback-test.dmg "Monitor Power Test"
+          hdiutil verify build/fallback-test.dmg
+          MOUNT=$(mktemp -d)
+          hdiutil attach build/fallback-test.dmg -nobrowse -mountpoint "$MOUNT"
+          test -d "$MOUNT/MonitorPower.app" && test -L "$MOUNT/Applications"
+          codesign --verify --deep --strict "$MOUNT/MonitorPower.app"
+          hdiutil detach "$MOUNT"
+          rm build/fallback-test.dmg
+
       - name: Verify bundle
         run: |
           codesign --verify --deep --strict build/MonitorPower.app
