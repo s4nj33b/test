@@ -4,14 +4,16 @@ import ServiceManagement
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private enum Defaults {
         static let chargingEnabled = "chargingEnabled"
-        static let offMode = "offMode"
-        static let fallbackPercent = "fallbackPercent"
+        static let runOnBattery = "runOnBattery"
+        static let dischargeTarget = "fallbackPercent"  // key kept from 0.01
     }
 
-    /// Range and step of the low-battery fallback slider, in battery percent.
-    private let fallbackRange = 10...80
-    private let fallbackStep = 5
-    private let defaultFallbackPercent = 20
+    /// Range and step of the discharge target slider, in battery percent.
+    private let targetRange = 10...80
+    private let targetStep = 5
+    private let defaultTarget = 20
+    /// Backup check of the discharge target in case no power event arrives.
+    private var dischargeCheckTimer: Timer?
     /// Minimum seconds between automatic re-applies triggered by power events.
     private let reapplyThrottle: TimeInterval = 30
 
@@ -21,15 +23,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let menu = NSMenu()
 
     private let toggle = NSSwitch()
+    private let batteryToggle = NSSwitch()
     private let batteryItem = NSMenuItem()
     private let sourceItem = NSMenuItem()
+    private let noticeItem = NSMenuItem()
     private let errorItem = NSMenuItem()
-    private let inhibitModeItem = NSMenuItem()
-    private let blockModeItem = NSMenuItem()
     private let loginItem = NSMenuItem()
     private let installHelperItem = NSMenuItem()
-    private let fallbackSlider = NSSlider()
-    private let fallbackLabel = NSTextField(labelWithString: "")
+    private let targetSlider = NSSlider()
+    private let targetLabel = NSTextField(labelWithString: "")
 
     private var lastApplied: PowerMode?
     private var lastApplyDate = Date.distantPast
@@ -41,6 +43,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Refreshes the menu every second while it is open.
     private var menuRefreshTimer: Timer?
     private var lastError: String?
+    /// Informational line, e.g. "Discharge finished at 20%".
+    private var notice: String?
 
     // MARK: - Persisted settings
 
@@ -49,32 +53,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         set { UserDefaults.standard.set(newValue, forKey: Defaults.chargingEnabled) }
     }
 
-    /// What "off" means: stop charging only, or ignore monitor power entirely.
-    private var offMode: PowerMode {
-        get {
-            let raw = UserDefaults.standard.string(forKey: Defaults.offMode) ?? PowerMode.inhibit.rawValue
-            return PowerMode(rawValue: raw) == .block ? .block : .inhibit
-        }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: Defaults.offMode) }
+    /// Discharge cycle in progress: the Mac ignores the power adapter and runs
+    /// on its battery until it reaches `dischargeTarget`.
+    private var runOnBattery: Bool {
+        get { UserDefaults.standard.bool(forKey: Defaults.runOnBattery) }
+        set { UserDefaults.standard.set(newValue, forKey: Defaults.runOnBattery) }
     }
 
-    /// In "block" mode the Mac runs on battery; at or below this level it falls
-    /// back to "inhibit", so the Mac runs from the monitor and the battery holds.
-    private var fallbackPercent: Int {
+    /// Battery level at which a discharge cycle ends and the Mac switches back
+    /// to the power adapter.
+    private var dischargeTarget: Int {
         get {
-            let stored = UserDefaults.standard.object(forKey: Defaults.fallbackPercent) as? Int
-            return min(max(stored ?? defaultFallbackPercent, fallbackRange.lowerBound), fallbackRange.upperBound)
+            let stored = UserDefaults.standard.object(forKey: Defaults.dischargeTarget) as? Int
+            return min(max(stored ?? defaultTarget, targetRange.lowerBound), targetRange.upperBound)
         }
-        set { UserDefaults.standard.set(newValue, forKey: Defaults.fallbackPercent) }
+        set { UserDefaults.standard.set(newValue, forKey: Defaults.dischargeTarget) }
     }
 
     /// The SMC mode that should currently be in effect.
     private var desiredMode: PowerMode {
-        if chargingEnabled { return .allow }
-        if offMode == .block, let pct = BatteryInfo.current().percent, pct <= fallbackPercent {
-            return .inhibit
-        }
-        return offMode
+        if runOnBattery { return .block }
+        return chargingEnabled ? .allow : .inhibit
     }
 
     // MARK: - Lifecycle
@@ -90,6 +89,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(didWake),
             name: NSWorkspace.didWakeNotification, object: nil)
+
+        let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in self?.powerSourceChanged() }
+        RunLoop.main.add(timer, forMode: .common)
+        dischargeCheckTimer = timer
 
         if moveToApplicationsIfNeeded() { return }
         if HelperInstaller.isUpToDate {
@@ -112,15 +115,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         menu.autoenablesItems = false
 
-        let toggleItem = NSMenuItem()
-        toggleItem.view = makeToggleView()
-        menu.addItem(toggleItem)
+        let chargeItem = NSMenuItem()
+        chargeItem.view = makeSwitchRow("Charge from Monitor", toggle, #selector(toggleChanged))
+        menu.addItem(chargeItem)
+        let dischargeItem = NSMenuItem()
+        dischargeItem.view = makeSwitchRow("Run on Battery", batteryToggle, #selector(batteryToggleChanged))
+        menu.addItem(dischargeItem)
+        let sliderItem = NSMenuItem()
+        sliderItem.view = makeTargetSliderView()
+        menu.addItem(sliderItem)
         menu.addItem(.separator())
 
-        for item in [batteryItem, sourceItem] {
+        for item in [batteryItem, sourceItem, noticeItem] {
             item.isEnabled = false
             menu.addItem(item)
         }
+        noticeItem.isHidden = true
         errorItem.isEnabled = false
         errorItem.isHidden = true
         menu.addItem(errorItem)
@@ -129,22 +139,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         installHelperItem.target = self
         menu.addItem(installHelperItem)
         menu.addItem(.separator())
-
-        let offModeParent = NSMenuItem(title: "When Off", action: nil, keyEquivalent: "")
-        let offModeMenu = NSMenu()
-        inhibitModeItem.title = "Stop Charging (keep using monitor power)"
-        inhibitModeItem.action = #selector(selectInhibitMode)
-        inhibitModeItem.target = self
-        blockModeItem.title = "Disconnect Monitor Power (run on battery)"
-        blockModeItem.action = #selector(selectBlockMode)
-        blockModeItem.target = self
-        offModeMenu.addItem(inhibitModeItem)
-        offModeMenu.addItem(blockModeItem)
-        let sliderItem = NSMenuItem()
-        sliderItem.view = makeFallbackSliderView()
-        offModeMenu.addItem(sliderItem)
-        offModeParent.submenu = offModeMenu
-        menu.addItem(offModeParent)
 
         loginItem.title = "Launch at Login"
         loginItem.action = #selector(toggleLaunchAtLogin)
@@ -166,61 +160,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshUI()
     }
 
-    private func makeToggleView() -> NSView {
-        let label = NSTextField(labelWithString: "Charge from Monitor")
+    private func makeSwitchRow(_ title: String, _ control: NSSwitch, _ action: Selector) -> NSView {
+        let label = NSTextField(labelWithString: title)
         label.font = .menuFont(ofSize: 0)
 
-        toggle.target = self
-        toggle.action = #selector(toggleChanged)
-        toggle.controlSize = .small
+        control.target = self
+        control.action = action
+        control.controlSize = .small
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
 
-        let stack = NSStackView(views: [label, spacer, toggle])
+        let stack = NSStackView(views: [label, spacer, control])
         stack.orientation = .horizontal
         stack.edgeInsets = NSEdgeInsets(top: 6, left: 14, bottom: 6, right: 14)
-        stack.frame = NSRect(x: 0, y: 0, width: 280, height: 32)
+        stack.frame = NSRect(x: 0, y: 0, width: 300, height: 32)
         stack.autoresizingMask = [.width]
         return stack
     }
 
-    private func makeFallbackSliderView() -> NSView {
-        fallbackLabel.font = .menuFont(ofSize: NSFont.smallSystemFontSize)
-        fallbackLabel.textColor = .secondaryLabelColor
+    private func makeTargetSliderView() -> NSView {
+        targetLabel.font = .menuFont(ofSize: NSFont.smallSystemFontSize)
+        targetLabel.textColor = .secondaryLabelColor
 
-        fallbackSlider.minValue = Double(fallbackRange.lowerBound)
-        fallbackSlider.maxValue = Double(fallbackRange.upperBound)
-        fallbackSlider.numberOfTickMarks = (fallbackRange.upperBound - fallbackRange.lowerBound) / fallbackStep + 1
-        fallbackSlider.allowsTickMarkValuesOnly = true
-        fallbackSlider.controlSize = .small
-        fallbackSlider.isContinuous = true
-        fallbackSlider.target = self
-        fallbackSlider.action = #selector(fallbackSliderChanged)
-        fallbackSlider.widthAnchor.constraint(greaterThanOrEqualToConstant: 190).isActive = true
+        targetSlider.minValue = Double(targetRange.lowerBound)
+        targetSlider.maxValue = Double(targetRange.upperBound)
+        targetSlider.numberOfTickMarks = (targetRange.upperBound - targetRange.lowerBound) / targetStep + 1
+        targetSlider.allowsTickMarkValuesOnly = true
+        targetSlider.controlSize = .small
+        targetSlider.isContinuous = true
+        targetSlider.target = self
+        targetSlider.action = #selector(targetSliderChanged)
+        targetSlider.widthAnchor.constraint(greaterThanOrEqualToConstant: 190).isActive = true
 
-        let minLabel = NSTextField(labelWithString: "\(fallbackRange.lowerBound)%")
-        let maxLabel = NSTextField(labelWithString: "\(fallbackRange.upperBound)%")
+        let minLabel = NSTextField(labelWithString: "\(targetRange.lowerBound)%")
+        let maxLabel = NSTextField(labelWithString: "\(targetRange.upperBound)%")
         for label in [minLabel, maxLabel] {
             label.font = .menuFont(ofSize: NSFont.smallSystemFontSize)
             label.textColor = .tertiaryLabelColor
         }
-        let sliderRow = NSStackView(views: [minLabel, fallbackSlider, maxLabel])
+        let sliderRow = NSStackView(views: [minLabel, targetSlider, maxLabel])
         sliderRow.orientation = .horizontal
         sliderRow.spacing = 6
 
-        let stack = NSStackView(views: [fallbackLabel, sliderRow])
+        let stack = NSStackView(views: [targetLabel, sliderRow])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 4
-        stack.edgeInsets = NSEdgeInsets(top: 4, left: 22, bottom: 6, right: 14)
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 14, bottom: 6, right: 14)
         stack.frame = NSRect(x: 0, y: 0, width: 300, height: 52)
         stack.autoresizingMask = [.width]
         return stack
     }
 
-    private func updateFallbackLabel() {
-        fallbackLabel.stringValue = "Use monitor power at or below \(fallbackPercent)% battery"
+    private func updateTargetLabel() {
+        targetLabel.stringValue = "Discharge down to \(dischargeTarget)%, then use monitor power"
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -255,6 +249,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func refreshUI() {
         toggle.state = chargingEnabled ? .on : .off
+        batteryToggle.state = runOnBattery ? .on : .off
 
         let info = BatteryInfo.current()
         let pct = info.percent.map { "\($0)%" } ?? "—"
@@ -268,15 +263,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             state = transitionText(for: t.mode)
         } else if info.isCharging {
             state = "Charging"
+        } else if lastApplied == .block {
+            state = "Discharging"
         } else if info.onExternalPower {
-            state = lastApplied == .block ? "On Battery (monitor power ignored)" : "Not Charging"
+            state = "Not Charging"
         } else {
             state = "On Battery"
         }
         batteryItem.title = "Battery: \(pct) · \(state)"
 
         if lastApplied == .block {
-            sourceItem.title = "USB-C Power: Ignored"
+            sourceItem.title = "Power Source: Battery (until \(dischargeTarget)%)"
         } else if info.onExternalPower {
             let watts = info.adapterWatts.map { " (\($0) W)" } ?? ""
             sourceItem.title = "USB-C Power Connected\(watts)"
@@ -286,6 +283,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         installHelperItem.isHidden = HelperInstaller.isUpToDate
 
+        noticeItem.title = notice ?? ""
+        noticeItem.isHidden = notice == nil
+
         if let lastError {
             errorItem.title = "⚠︎ \(lastError)"
             errorItem.isHidden = false
@@ -293,12 +293,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             errorItem.isHidden = true
         }
 
-        inhibitModeItem.state = offMode == .inhibit ? .on : .off
-        blockModeItem.state = offMode == .block ? .on : .off
-        fallbackSlider.integerValue = fallbackPercent
-        fallbackSlider.isEnabled = offMode == .block
-        fallbackLabel.textColor = offMode == .block ? .secondaryLabelColor : .tertiaryLabelColor
-        updateFallbackLabel()
+        targetSlider.integerValue = dischargeTarget
+        updateTargetLabel()
 
         if #available(macOS 13.0, *) {
             loginItem.isHidden = false
@@ -311,42 +307,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateIcon() {
-        let symbol = chargingEnabled ? "bolt.fill" : "bolt.slash.fill"
+        let symbol: String
+        let tip: String
+        if runOnBattery {
+            symbol = "battery.25"
+            tip = "Monitor Power: running on battery until \(dischargeTarget)%"
+        } else if chargingEnabled {
+            symbol = "bolt.fill"
+            tip = "Monitor Power: charging from monitor"
+        } else {
+            symbol = "bolt.slash.fill"
+            tip = "Monitor Power: charging from monitor is off"
+        }
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Monitor Power")
         image?.isTemplate = true
         statusItem.button?.image = image
-        statusItem.button?.toolTip = chargingEnabled
-            ? "Monitor Power: charging from monitor"
-            : "Monitor Power: charging from monitor is off"
+        statusItem.button?.toolTip = tip
     }
 
     // MARK: - Actions
 
     @objc private func toggleChanged() {
         chargingEnabled = toggle.state == .on
+        notice = nil
         applyDesiredMode(force: true)
     }
 
-    @objc private func selectInhibitMode() {
-        offMode = .inhibit
+    @objc private func batteryToggleChanged() {
+        if batteryToggle.state == .on {
+            if let pct = BatteryInfo.current().percent, pct <= dischargeTarget {
+                notice = "Battery is already at \(pct)%. Lower the target below to discharge."
+                batteryToggle.state = .off
+                refreshUI()
+                return
+            }
+            notice = nil
+            runOnBattery = true
+        } else {
+            runOnBattery = false
+        }
         applyDesiredMode(force: true)
     }
 
-    @objc private func selectBlockMode() {
-        offMode = .block
-        applyDesiredMode(force: true)
-    }
+    @objc private func targetSliderChanged() {
+        let stepped = Int((targetSlider.doubleValue / Double(targetStep)).rounded()) * targetStep
+        dischargeTarget = stepped
+        updateTargetLabel()
 
-    @objc private func fallbackSliderChanged() {
-        let stepped = Int((fallbackSlider.doubleValue / Double(fallbackStep)).rounded()) * fallbackStep
-        fallbackPercent = stepped
-        updateFallbackLabel()
-
-        // Apply once the drag ends, and only if the threshold now changes the mode.
+        // Act once the drag ends: a higher target may end a running discharge.
         let isDragging = NSApp.currentEvent?.type == .leftMouseDragged
-        if !isDragging, desiredMode != lastApplied {
+        if !isDragging, finishDischargeIfTargetReached() {
             applyDesiredMode(force: true)
         }
+    }
+
+    /// Ends the discharge cycle once the battery reaches the target.
+    /// Returns true if the cycle was ended.
+    @discardableResult
+    private func finishDischargeIfTargetReached() -> Bool {
+        guard runOnBattery, let pct = BatteryInfo.current().percent, pct <= dischargeTarget else { return false }
+        runOnBattery = false
+        let next = chargingEnabled ? "charging from monitor" : "running on monitor power"
+        notice = "Discharge finished at \(pct)%; now \(next)"
+        return true
     }
 
     @objc private func toggleLaunchAtLogin() {
@@ -476,12 +499,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func powerSourceChanged() {
+        finishDischargeIfTargetReached()
         let desired = desiredMode
         let info = BatteryInfo.current()
-        // Re-assert if the mode should change (e.g. low-battery fallback) or if the
+        // Re-assert if the mode should change (e.g. discharge finished) or if the
         // firmware started charging again on its own (e.g. after a cable re-plug).
         let drifted = desired != .allow && info.isCharging
-        if desired != lastApplied || drifted {
+        if desired != lastApplied {
+            applyDesiredMode(force: true)
+        } else if drifted {
             applyDesiredMode(force: false)
         } else {
             refreshUI()

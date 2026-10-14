@@ -34,9 +34,9 @@ USB-C monitors with **Power Delivery** charge your MacBook as soon as you plug i
 | | Feature | Description |
 |---|---|---|
 | 🎚️ | **One-click toggle** | A *Charge from Monitor* switch right in the menu bar. |
-| 🔋 | **Stop Charging mode** | The Mac runs on the monitor's power and the battery stays at its current level. |
-| 🪫 | **Disconnect Monitor Power mode** | The Mac ignores the monitor's power and runs on its battery. |
-| 📉 | **Low-battery threshold slider** | Choose 10–80%. In Disconnect mode, the Mac switches back to the monitor's power at that level, so it never runs flat. |
+| 🔋 | **Stop charging** | Turn the switch off: the Mac keeps running on the monitor's power and the battery stays at its current level. |
+| 🪫 | **Run on Battery** | A second switch: the Mac stops drawing power from the adapter and runs on its battery, giving the battery a healthy discharge while the cable stays plugged in. |
+| 📉 | **Discharge target slider** | Choose 10–80%. When the battery reaches it, the discharge ends and the Mac goes back to the monitor's power automatically. |
 | 📊 | **Live status** | Battery %, charging state and the monitor's wattage. |
 | 🛡️ | **Safe by default** | Quitting or uninstalling always restores normal charging. |
 | 🔁 | **Self-healing** | Re-applies your setting after sleep, after a reboot, and when you re-plug the cable. |
@@ -46,31 +46,24 @@ USB-C monitors with **Power Delivery** charge your MacBook as soon as you plug i
 ### The menu
 
 ```
- ⚡︎ ─┬───────────────────────────────────────────┐
-     │  Charge from Monitor              [ ◯━━ ] │  ← the main switch
-     ├───────────────────────────────────────────┤
-     │  Battery: 76% · Not Charging              │
-     │  USB-C Power Connected (90 W)             │
-     ├───────────────────────────────────────────┤
-     │  When Off                               ▸ │──┐
-     │  Launch at Login                       ✓  │  │
-     ├───────────────────────────────────────────┤  │
-     │  Monitor Power 0.01                       │  │
-     │  Uninstall…                               │  │
-     │  Quit Monitor Power                   ⌘Q  │  │
-     └───────────────────────────────────────────┘  │
-                                                    │
-     ┌──────────────────────────────────────────────┘
-     ▼
-     ┌───────────────────────────────────────────────┐
-     │ ✓ Stop Charging (keep using monitor power)    │
-     │   Disconnect Monitor Power (run on battery)   │
-     │     Use monitor power at or below 20% battery │
-     │     10% ──────●──────────────────────── 80%   │
-     └───────────────────────────────────────────────┘
+ ⚡︎ ─┬──────────────────────────────────────────────┐
+     │  Charge from Monitor                 [ ◯━━ ] │  ← charge or not
+     │  Run on Battery                      [ ━━◯ ] │  ← discharge cycle
+     │  Discharge down to 20%, then use monitor power │
+     │  10% ──────●─────────────────────────── 80%   │
+     ├──────────────────────────────────────────────┤
+     │  Battery: 76% · Discharging                  │
+     │  Power Source: Battery (until 20%)           │
+     ├──────────────────────────────────────────────┤
+     │  Launch at Login                          ✓  │
+     ├──────────────────────────────────────────────┤
+     │  Monitor Power 0.02                          │
+     │  Uninstall…                                  │
+     │  Quit Monitor Power                      ⌘Q  │
+     └──────────────────────────────────────────────┘
 ```
 
-The menu bar icon shows the current state: **⚡ `bolt`** while charging is allowed, **`bolt.slash`** while it is off.
+The menu bar icon shows the current state: **⚡ `bolt`** while charging is allowed, **`bolt.slash`** while it is off, and **🔋 `battery.25`** while a discharge cycle is running.
 
 ---
 
@@ -95,7 +88,7 @@ The menu bar icon shows the current state: **⚡ `bolt`** while charging is allo
 
 ### Option A: DMG (recommended, no Terminal)
 
-1. **Download** `MonitorPower-0.01.dmg` from the [**Releases**](https://github.com/s4nj33b/test/releases) page.
+1. **Download** the latest `MonitorPower-<version>.dmg` from the [**Releases**](https://github.com/s4nj33b/test/releases) page.
 2. **Open** the DMG and **drag Monitor Power into Applications**.
 
    ```
@@ -149,51 +142,46 @@ See [Building from source](#-building-from-source).
 
 ## 🎮 How to use
 
-### The switch
+### Charge from Monitor
 
 | Switch | What happens |
 |:---:|---|
 | **ON** 🟢 | Normal behaviour: the MacBook runs on the monitor's power **and charges**. |
-| **OFF** ⚪ | The MacBook **stops charging** from the monitor. What exactly happens depends on the **When Off** setting below. |
+| **OFF** ⚪ | The MacBook **stops charging**. It keeps running on the monitor's power and the battery stays at its current level. |
 
-### "When Off" modes
+### 🪫 Run on Battery (healthy discharge)
 
-<table>
-<tr><th>Mode</th><th>Power for the Mac</th><th>Battery</th><th>Best for</th></tr>
-<tr>
-<td><b>🔋 Stop Charging</b><br><sub>(default)</sub></td>
-<td>From the monitor</td>
-<td>Stays at its current level</td>
-<td>Long desk sessions. Protects battery health without draining it.</td>
-</tr>
-<tr>
-<td><b>🪫 Disconnect Monitor Power</b></td>
-<td>From the battery</td>
-<td>Drains, down to the threshold you set</td>
-<td>Bringing a full battery down to a healthier level, or a monitor that cannot supply enough power.</td>
-</tr>
-</table>
+A lithium-ion battery that sits at the same charge all day, every day, ages faster. Running on battery now and then gives it a healthy discharge, without unplugging the cable.
 
-### 📉 Low-battery threshold slider
+| Switch | What happens |
+|:---:|---|
+| **ON** 🟢 | The Mac **stops using the power adapter** and runs on its battery, even though the monitor is still connected. The status shows *Discharging*. |
+| **OFF** ⚪ | The Mac uses the monitor's power again. |
 
-In **Disconnect Monitor Power** mode, a slider under the option sets a safety threshold:
+**Discharge target slider:** 10%–80% in 5% steps, default 20%.
 
-- **Range:** 10% – 80%, in 5% steps. **Default:** 20%.
-- When the battery **reaches the threshold**, the app switches to *Stop Charging*. The Mac then runs on the monitor's power and the battery **stays at that level**.
-- Move the slider **above** the current battery level to switch to the monitor's power immediately. Move it **below** to go back to running on battery.
+- When the battery **reaches the target**, the discharge cycle ends on its own. **Run on Battery** turns off and the Mac goes back to the monitor's power.
+- What happens next depends on **Charge from Monitor**:
+  - **On:** the battery charges back up.
+  - **Off:** the battery stays at the target level.
+- If the battery is already at or below the target, Run on Battery won't start. The menu tells you to lower the target first.
+- Moving the slider **above** the current level during a discharge ends it immediately.
 
 ```
 Battery %   100 ─┐
-                 │╲   running on battery (Disconnect mode)
+                 │╲   Run on Battery: discharging
                  │ ╲
                  │  ╲
- threshold   20 ─┤───●━━━━━━━━━━━━━━━━━━━  held at 20% (running on monitor power)
-                 │
+    target   20 ─┤───●╱╱╱╱╱  Charge from Monitor ON:  charges back up
+                 │    ●━━━━━  Charge from Monitor OFF: held at the target
              0  ─┴──────────────────────────────▶ time
 ```
 
 > [!TIP]
-> To keep a battery healthy, many people keep it between **20% and 80%**. Set the slider to 50–80% to keep a comfortable reserve while docked.
+> For a typical healthy cycle, set the target to **20–40%**, turn on **Run on Battery**, and leave **Charge from Monitor** on. The Mac discharges, then charges back up by itself.
+
+> [!NOTE]
+> A discharge cycle survives restarts of the app and of the Mac, as long as **Launch at Login** is on. Quitting the app always returns the Mac to normal charging.
 
 ---
 
@@ -212,8 +200,8 @@ Battery %   100 ─┐
    | Command | Effect | SMC keys written |
    |---|---|---|
    | `allow` | Normal charging | adapter on, charging on |
-   | `inhibit` | Stop Charging | `CHTE` (or `CH0B` + `CH0C` on older firmware) |
-   | `block` | Disconnect Monitor Power | `CHIE` (or `CH0I` on older firmware) |
+   | `inhibit` | Charge from Monitor off | `CHTE` (or `CH0B` + `CH0C` on older firmware) |
+   | `block` | Run on Battery | `CHIE` (or `CH0I` on older firmware) |
    | `status` | Read-only report | — |
 
 3. **During setup**, the helper is installed to `/usr/local/bin/smc-power`, owned by root. A sudoers rule is added at `/etc/sudoers.d/monitor-power`. The rule lets **only your user** run **only those four commands** without a password. It is checked with `visudo` before it is installed.
@@ -300,8 +288,8 @@ cd test/MonitorPower
 
 ./scripts/build-dmg.sh   # one step: build, verify and show build/MonitorPower-<version>.dmg
 make app                 # build/MonitorPower.app (helper included)
-make dmg                 # build/MonitorPower-0.01.dmg
-make dmg VERSION=0.02    # set a custom version
+make dmg                 # build/MonitorPower-0.02.dmg
+make dmg VERSION=0.03    # set a custom version
 ./scripts/install.sh     # build, install the helper and copy the app to /Applications
 ```
 
@@ -314,7 +302,7 @@ MonitorPower/
 │   ├── MonitorPower.entitlements   # hardened-runtime entitlements
 │   └── Sources/
 │       ├── main.swift              # app entry point
-│       ├── AppDelegate.swift       # menu, switch, slider, setup flow
+│       ├── AppDelegate.swift       # menu, switches, slider, setup flow
 │       ├── PowerController.swift   # calls the helper via sudo -n
 │       ├── PowerSourceMonitor.swift# battery %, charging state, power events
 │       └── HelperInstaller.swift   # one-time admin setup from inside the app

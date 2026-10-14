@@ -1,6 +1,6 @@
 # Builds the menu bar app, the SMC helper and the distributable DMG.
 # Requires macOS with the Xcode Command Line Tools.
-VERSION ?= 0.01
+VERSION ?= 0.02
 BUILD   := build
 APP     := $(BUILD)/MonitorPower.app
 HELPER  := $(BUILD)/smc-power

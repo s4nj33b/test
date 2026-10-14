@@ -45,7 +45,7 @@ jobs:
             echo "TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
             echo "VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
           else
-            echo "VERSION=0.01-dev.${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+            echo "VERSION=0.02-dev.${GITHUB_SHA::7}" >> "$GITHUB_ENV"
           fi
 
       - name: Import Developer ID certificate
